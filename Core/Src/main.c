@@ -115,6 +115,18 @@ bool spi_transmit(uint8_t *pData, uint8_t len, uint32_t timeout)
 {
   uint32_t count = 0;
   uint8_t index = 0;
+  //Chờ cờ BUSY tắt
+    while (SPI1->SR & SPI_SR_BSY)
+    {
+      if (count > timeout)
+      {
+        return false;
+      }
+      else
+        count++;
+    }
+    count=0;
+
   // Bật ngoại vi SPI
   SPI1->CR1 |= SPI_CR1_SPE;
   // Truyền dữ liệu
@@ -157,6 +169,19 @@ bool spi_receive(uint8_t *pData, uint8_t len, uint32_t timeout)
 {
   uint32_t count = 0;
   uint8_t index = 0;
+
+  //Chờ cờ BUSY tắt
+    while (SPI1->SR & SPI_SR_BSY)
+    {
+      if (count > timeout)
+      {
+        return false;
+      }
+      else
+        count++;
+    }
+    count=0;
+
   // Bật ngoại vi SPI
   SPI1->CR1 |= SPI_CR1_SPE;
   bool isTransmit = 1;
@@ -222,6 +247,119 @@ bool exchange(uint8_t *data)
    spi_receive(data, 1, 1000);
    return true;
 }
+
+void read_id_manufact()
+{
+  uint8_t data[4] = {0x9F,0x00,0x00,0x00};
+  uint8_t enable_write_intruction = 0x06;
+  uint8_t rxdata[4];
+  //Kéo CS xuống mức 0
+  GPIOA->ODR &=~(GPIO_ODR_ODR3);
+  //Bật tính năng ghi
+  spi_transmit(&enable_write_intruction, 1,1000);
+  //Kéo CS lên mức 1
+  GPIOA->ODR |= (GPIO_ODR_ODR3);
+
+  for(int i=0;i<1000;i++);//Delay
+
+
+  GPIOA->ODR &=~(GPIO_ODR_ODR3);
+  spi_transmit(data, 4, 1000);
+  spi_receive(rxdata, 4, 1000);
+  GPIOA->ODR |= (GPIO_ODR_ODR3);
+}
+
+void write_data(uint32_t Address, uint8_t *pdata, uint16_t size)
+{
+    uint8_t enable_write_instruction = 0x06;
+    uint8_t write_page_instruction = 0x02;
+
+    // Kéo CS xuống mức 0 để bắt đầu giao tiếp
+    GPIOA->ODR &= ~(GPIO_ODR_ODR3);
+    // Bật tính năng ghi bằng lệnh Write Enable (0x06)
+    spi_transmit(&enable_write_instruction, 1, 1000);
+    // Kéo CS lên mức 1 để hoàn thành lệnh
+    GPIOA->ODR |= (GPIO_ODR_ODR3);
+
+    // Kéo CS xuống mức 0 để bắt đầu lệnh ghi trang
+    GPIOA->ODR &= ~(GPIO_ODR_ODR3);
+    // Gửi lệnh ghi trang (0x02)
+    spi_transmit(&write_page_instruction, 1, 1000);
+    // Gửi địa chỉ 24-bit (A23-A0)
+    uint8_t addr_bytes[3];
+    addr_bytes[0] = (Address >> 16) & 0xFF; // A23-A16
+    addr_bytes[1] = (Address >> 8) & 0xFF;  // A15-A8
+    addr_bytes[2] = Address & 0xFF;         // A7-A0
+    spi_transmit(addr_bytes, 3, 1000);
+    // Gửi dữ liệu cần ghi
+    spi_transmit(pdata, size, 1000);
+    // Kéo CS lên mức 1 để hoàn thành lệnh
+    GPIOA->ODR |= (GPIO_ODR_ODR3);
+
+    for(int i=0;i<1000;++i);//Delay
+}
+
+void read_data(uint32_t Address, uint8_t *pdata, uint16_t size)
+{
+    uint8_t read_page_instruction = 0x03;
+
+    // Kéo CS xuống mức 0 để bắt đầu lệnh ghi trang
+    GPIOA->ODR &= ~(GPIO_ODR_ODR3);
+    // Gửi lệnh đọc (0x03)
+    spi_transmit(&read_page_instruction, 1, 1000);
+    // Gửi địa chỉ 24-bit (A23-A0)
+    uint8_t addr_bytes[3];
+    addr_bytes[0] = (Address >> 16) & 0xFF; // A23-A16
+    addr_bytes[1] = (Address >> 8) & 0xFF;  // A15-A8
+    addr_bytes[2] = Address & 0xFF;         // A7-A0
+    spi_transmit(addr_bytes, 3, 1000);
+    // Lưu dữ liệu
+    spi_receive(pdata, size, 1000);
+    // Kéo CS lên mức 1 để hoàn thành lệnh
+    GPIOA->ODR |= (GPIO_ODR_ODR3);
+    for(int i=0;i<1000;++i);//Delay
+}
+
+void erase_sector(uint32_t Address) //Hàm chưa xóa dc sector
+{
+  uint8_t enable_write_instruction = 0x06;
+  uint8_t erase_sector_instruction = 0x21;
+
+  uint8_t addr_bytes[4];
+  addr_bytes[0] = (Address >> 24) & 0xFF; // A23-A16
+  addr_bytes[1] = (Address >> 16) & 0xFF;  // A15-A8
+  addr_bytes[2] = (Address >> 8) & 0xFF;         // A7-A0
+  addr_bytes[3] = Address & 0xFF;
+
+  // Bật tính năng ghi bằng lệnh Write Enable (0x06)
+  GPIOA->ODR &= ~(GPIO_ODR_ODR3);
+  spi_transmit(&enable_write_instruction, 1, 1000);
+  GPIOA->ODR |= (GPIO_ODR_ODR3);
+
+  // Gửi lệnh xóa sector
+  GPIOA->ODR &= ~(GPIO_ODR_ODR3);
+  spi_transmit(&erase_sector_instruction, 1, 1000);
+  spi_transmit(addr_bytes, 4, 1000);
+  GPIOA->ODR |= (GPIO_ODR_ODR3);
+
+  for(uint32_t i=0;i<1000;++i);
+}
+
+void reset_device(void)
+{
+  uint8_t enable_reset_instruction = 0x66;
+  uint8_t reset_instruction = 0x99;
+
+  GPIOA->ODR &= ~(GPIO_ODR_ODR3);
+  spi_transmit(&enable_reset_instruction, 1, 1000);
+  GPIOA->ODR |= (GPIO_ODR_ODR3);
+
+  GPIOA->ODR &= ~(GPIO_ODR_ODR3);
+  spi_transmit(&reset_instruction, 1, 1000);
+  GPIOA->ODR |= (GPIO_ODR_ODR3);
+  for(int i=0;i<1000;i++);
+
+}
 /* USER CODE END 0 */
 
 /**
@@ -256,14 +394,16 @@ int main(void)
   /* USER CODE BEGIN 2 */
   spi_gpio_config();
   spi_config();
-  uint8_t data=0x9f;
-  uint8_t dumb=0x00;
-  uint8_t rxdata;
-  //Kéo CS xuống mức 0
-  GPIOA->ODR &=~(GPIO_ODR_ODR3);
-  spi_transmit(&data, 1, 1000);
-  //Kéo CS lên mức 1
-  GPIOA->ODR |= (GPIO_ODR_ODR3);
+  uint8_t txbuffer[10];
+  uint8_t rxbuffer[10];
+  for(int i=0;i<10;i++)
+    txbuffer[i]=i;
+//  reset_device();
+//  erase_sector(0x0000);
+
+//  write_data(0x0000,txbuffer , 10);
+
+  read_data(0x000000, rxbuffer, 10);
 
 
   /* USER CODE END 2 */
