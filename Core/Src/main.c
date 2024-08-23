@@ -103,12 +103,16 @@ void spi_config(void)
   // Dữ liệu 8 bit
   SPI1->CR1 &= ~(SPI_CR1_DFF);
   // Chọn slave
-  SPI1->CR1 &= ~(SPI_CR1_SSM);
+  SPI1->CR1 |= (SPI_CR1_SSM);
   SPI1->CR1 |= (SPI_CR1_SSI);
   // Bật ngoại vi SPI
   SPI1->CR1 |= SPI_CR1_SPE;
   // Xóa tất cả cờ
+  //Clear initial flags
+//  __IO uint32_t tempRd = SPI1->SR;
   (void)SPI1->SR;
+
+
 }
 
 bool spi_transmit(uint8_t *pData, uint8_t len, uint32_t timeout)
@@ -165,6 +169,63 @@ bool spi_transmit(uint8_t *pData, uint8_t len, uint32_t timeout)
   (void)SPI1->SR;
   return true;
 }
+
+uint8_t *global_txdata;
+uint8_t global_txlen;
+uint8_t global_txindex=0;
+
+bool spi_transmit_it(uint8_t *pData, uint8_t len, uint32_t timeout)
+{
+    global_txdata = pData;
+    global_txlen = len;
+    global_txindex = 0; // Đặt lại chỉ số toàn cục
+    uint32_t count = 0;
+    // Chờ cờ BUSY tắt
+    while (SPI1->SR & SPI_SR_BSY)
+    {
+        if (count > timeout)
+        {
+            return false;
+        }
+        else
+            count++;
+    }
+    // Bật ngoại vi SPI
+    SPI1->CR1 |= SPI_CR1_SPE;
+    // Bật ngắt bộ đệm truyền
+    SPI1->CR2 |= SPI_CR2_TXEIE;
+    return true;
+}
+
+
+uint8_t *global_rxdata;
+uint8_t global_rxindex = 0;
+uint8_t global_rxlen;
+bool spi_receive_it(uint8_t *pData, uint8_t len, uint32_t timeout)
+{
+  uint32_t count = 0;
+  global_rxdata = pData;
+  global_rxlen = len;
+  global_rxindex = 0; // Đặt lại chỉ số toàn cục
+  //Chờ cờ BUSY tắt
+    while (SPI1->SR & SPI_SR_BSY)
+    {
+      if (count > timeout)
+      {
+        return false;
+      }
+      else
+        count++;
+    }
+    // Bật ngoại vi SPI
+    SPI1->CR1 |= SPI_CR1_SPE;
+    // Bật bộ đệm ngắt
+    SPI1->CR2 |= SPI_CR2_RXNEIE;
+
+    return true;
+
+}
+
 bool spi_receive(uint8_t *pData, uint8_t len, uint32_t timeout)
 {
   uint32_t count = 0;
@@ -250,9 +311,10 @@ bool exchange(uint8_t *data)
 
 void read_id_manufact()
 {
+  //Dùng salae để coi ID
   uint8_t data[4] = {0x9F,0x00,0x00,0x00};
   uint8_t enable_write_intruction = 0x06;
-  uint8_t rxdata[4];
+
   //Kéo CS xuống mức 0
   GPIOA->ODR &=~(GPIO_ODR_ODR3);
   //Bật tính năng ghi
@@ -260,13 +322,10 @@ void read_id_manufact()
   //Kéo CS lên mức 1
   GPIOA->ODR |= (GPIO_ODR_ODR3);
 
-  for(int i=0;i<1000;i++);//Delay
-
-
   GPIOA->ODR &=~(GPIO_ODR_ODR3);
   spi_transmit(data, 4, 1000);
-  spi_receive(rxdata, 4, 1000);
   GPIOA->ODR |= (GPIO_ODR_ODR3);
+  for(int i=0;i<1000;++i);//Delay
 }
 
 void write_data(uint32_t Address, uint8_t *pdata, uint16_t size)
@@ -312,6 +371,7 @@ void read_data(uint32_t Address, uint8_t *pdata, uint16_t size)
     addr_bytes[0] = (Address >> 16) & 0xFF; // A23-A16
     addr_bytes[1] = (Address >> 8) & 0xFF;  // A15-A8
     addr_bytes[2] = Address & 0xFF;         // A7-A0
+
     spi_transmit(addr_bytes, 3, 1000);
     // Lưu dữ liệu
     spi_receive(pdata, size, 1000);
@@ -320,16 +380,41 @@ void read_data(uint32_t Address, uint8_t *pdata, uint16_t size)
     for(int i=0;i<1000;++i);//Delay
 }
 
-void erase_sector(uint32_t Address) //Hàm chưa xóa dc sector
-{
-  uint8_t enable_write_instruction = 0x06;
-  uint8_t erase_sector_instruction = 0x21;
 
-  uint8_t addr_bytes[4];
-  addr_bytes[0] = (Address >> 24) & 0xFF; // A23-A16
-  addr_bytes[1] = (Address >> 16) & 0xFF;  // A15-A8
-  addr_bytes[2] = (Address >> 8) & 0xFF;         // A7-A0
-  addr_bytes[3] = Address & 0xFF;
+
+
+void read_data_it(uint32_t Address, uint8_t *pdata, uint16_t size)
+{
+    uint8_t read_page_instruction = 0x03;
+
+    // Kéo CS xuống mức 0 để bắt đầu lệnh ghi trang
+    GPIOA->ODR &= ~(GPIO_ODR_ODR3);
+    // Gửi lệnh đọc (0x03)
+    spi_transmit_it(&read_page_instruction, 1, 1000);
+    // Gửi địa chỉ 24-bit (A23-A0)
+    uint8_t addr_bytes[3];
+    addr_bytes[0] = (Address >> 16) & 0xFF;
+    addr_bytes[1] = (Address >> 8) & 0xFF;
+    addr_bytes[2] = Address & 0xFF;
+    spi_transmit(addr_bytes, 3, 1000);
+    // Lưu dữ liệu
+    spi_receive_it(pdata, size, 1000);
+    // Kéo CS lên mức 1 để hoàn thành lệnh
+    GPIOA->ODR |= (GPIO_ODR_ODR3);
+    for(int i=0;i<1000;++i);//Delay
+}
+
+
+void erase_sector(uint32_t Address)
+{
+
+  uint8_t enable_write_instruction = 0x06;
+  uint8_t erase_sector_instruction = 0x20;
+
+  uint8_t addr_bytes[3];
+  addr_bytes[0] = (Address >> 16) & 0xFF;
+  addr_bytes[1] = (Address >> 8) & 0xFF;
+  addr_bytes[2] = Address & 0xFF;
 
   // Bật tính năng ghi bằng lệnh Write Enable (0x06)
   GPIOA->ODR &= ~(GPIO_ODR_ODR3);
@@ -339,7 +424,7 @@ void erase_sector(uint32_t Address) //Hàm chưa xóa dc sector
   // Gửi lệnh xóa sector
   GPIOA->ODR &= ~(GPIO_ODR_ODR3);
   spi_transmit(&erase_sector_instruction, 1, 1000);
-  spi_transmit(addr_bytes, 4, 1000);
+  spi_transmit(addr_bytes, 3, 1000);
   GPIOA->ODR |= (GPIO_ODR_ODR3);
 
   for(uint32_t i=0;i<1000;++i);
@@ -357,9 +442,35 @@ void reset_device(void)
   GPIOA->ODR &= ~(GPIO_ODR_ODR3);
   spi_transmit(&reset_instruction, 1, 1000);
   GPIOA->ODR |= (GPIO_ODR_ODR3);
-  for(int i=0;i<1000;i++);
+  for(int i=0;i<5000;i++);
 
 }
+
+void erase_chip(void)
+{
+  uint8_t enable_write_instruction = 0x06;
+  uint8_t chip_erase_instruction = 0x60;
+
+  // Kéo CS xuống mức 0 để bắt đầu giao tiếp
+   GPIOA->ODR &= ~(GPIO_ODR_ODR3);
+   // Bật tính năng ghi bằng lệnh Write Enable (0x06)
+   spi_transmit_it(&enable_write_instruction, 1, 1000);
+   // Kéo CS lên mức 1 để hoàn thành lệnh
+   GPIOA->ODR |= (GPIO_ODR_ODR3);
+
+
+  GPIOA->ODR &= ~(GPIO_ODR_ODR3);
+  spi_transmit(&chip_erase_instruction, 1, 1000);
+  GPIOA->ODR |= (GPIO_ODR_ODR3);
+
+  for(int i=0;i<1000;i++);
+
+  //Dữ liệu sau khi xóa là 0x00
+}
+
+
+
+
 /* USER CODE END 0 */
 
 /**
@@ -394,17 +505,27 @@ int main(void)
   /* USER CODE BEGIN 2 */
   spi_gpio_config();
   spi_config();
-  uint8_t txbuffer[10];
-  uint8_t rxbuffer[10];
+
+  //Bật ngắt SPI1
+  NVIC_SetPriority(SPI1_IRQn, 0);
+  NVIC_EnableIRQ(SPI1_IRQn);
+
+  uint8_t txbuffer[10]={0};
+  uint8_t rxbuffer[10]={0};
+  //Tạo data cho txbuffer
   for(int i=0;i<10;i++)
     txbuffer[i]=i;
-//  reset_device();
-//  erase_sector(0x0000);
 
-//  write_data(0x0000,txbuffer , 10);
+//  reset_device();
+  erase_chip();
+
+//  read_id_manufact(id_rom);
+  read_data(0x0000000, rxbuffer, 10);
+//  erase_sector(0x000000);
+
+  write_data(0x000000,txbuffer , 10);
 
   read_data(0x000000, rxbuffer, 10);
-
 
   /* USER CODE END 2 */
 
@@ -472,7 +593,51 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void SPI1_IRQHandler(void)
+{
+    // Kiểm tra ngắt TXE (Truyền dữ liệu)
+    if ((SPI1->SR & SPI_SR_TXE) && (SPI1->CR2 & SPI_CR2_TXEIE))
+    {
 
+        if (global_txindex >= global_txlen) // Kiểm tra điều kiện chính xác
+        {
+            // Tắt ngắt bộ đệm truyền
+            SPI1->CR2 &= ~(SPI_CR2_TXEIE);
+
+            // Xóa cờ OVERRUN bằng cách đọc DR và SR
+            (void)SPI1->DR;
+            (void)SPI1->SR;
+        }
+        else
+        {
+          SPI1->DR = global_txdata[global_txindex];
+          global_txindex++;
+        }
+    }
+    // Kiểm tra ngắt RXNE (Nhận dữ liệu)
+    //Ngắt nhận không chạy được
+    if (!(SPI1->SR & SPI_SR_RXNE) && (SPI1->CR2 & SPI_CR2_RXNEIE))
+    {
+        if(global_rxindex >= global_rxlen)
+        {
+          // Tắt ngắt bộ đệm truyền
+          SPI1->CR2 &= ~(SPI_CR2_RXNEIE);
+
+          // Xóa cờ OVERRUN bằng cách đọc DR và SR
+          (void)SPI1->DR;
+          (void)SPI1->SR;
+        }
+        //Truyền dữ liệu rác trước
+        //Kiểm tra bộ đệm truyền có trống hay không và isTransmit = 1 hay không
+        else if (SPI1->SR & SPI_SR_TXE)
+        {
+          SPI1->DR = 0xFF;
+          global_rxdata[global_rxindex] = SPI1->DR ;
+          global_rxindex++;
+        }
+    }
+
+}
 /* USER CODE END 4 */
 
 /**
